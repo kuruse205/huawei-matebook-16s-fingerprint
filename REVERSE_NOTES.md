@@ -93,3 +93,43 @@ GPIO-тогглом сам. **Это ключевой вопрос к gfspi.dll.
 
 - 2026-10-12: драйвер скачан с сайта Huawei, распакован (zip→NSIS→NSIS),
   INF/строки задамплены, этот файл создан.
+- 2026-10-12 (глубокая ночь): **Ghidra-автокопание** (headless 75с,
+  проект `~/Tools/ghidra_projects/gxfp`, скрипт MineStringXrefs.java →
+  `_vendor/ghidra_export/gfspi_mined.txt`). Главные результаты:
+  1. Утёкли пути исходников Goodix: `f:\git\huawei_win\winfpcode\
+     milan_watt\milanspi\{common\peripheral.c, private.c,
+     milanfusb\device.c, milanfusb\usbhal.c}` — проект «milan_watt».
+     Файл usbhal.c — наследие USB-версии, внутри уже SPI.
+  2. **Транспорт = IOCTL_SPB_EXECUTE_SEQUENCE (0x41808)** в
+     `SpbPeripheralExecuteSequence` (peripheral.c): WdfRequestCreate →
+     WdfMemoryCreatePreallocated → WdfIoTargetFormatRequestForIoctl →
+     атомарная последовательность write+read с нативным CS от SPB.
+     Для Linux это эквивалент full-duplex-трансфера одним опусканием CS.
+  3. **Проект-типы** (глоб. DAT_1804e12ec): 0x12 и 1 = SPI-проекты
+     (наш 16s = 0x12: требует ≥1 GpioIo (reset) + GpioInt + SpiSerialBus;
+     SPI открывается по connection-ID 0x12019f через FUN_1800119bc);
+     0xc = мейлбокс с read-done/write-done GPIO (это D16!); 1,2 = EC;
+     9/0xb/0xd/0xe/0x11 = ресет через ACPI **_DSM** (хелпер с
+     '_DSM'-GUID); 4 = KB soft reset.
+  4. **HardResetMcu (peripheral.c, 0x6b0-0x755)** для 0x12: WDF-GPIO
+     запись `true` → Sleep(cfg+0x438) → инверсия → запись → Sleep
+     (cfg+0x43c) → «Done». Полярность вероятно active-low (в _CRS
+     GpioIo), т.е. физически: ресет-низ → пауза → ресет-высок.
+  5. **ФОРМАТ КАДРА ПОДТВЕРЖДЁН БАЙТ-В-БАЙТ С D16** —
+     `CheckPackageHead` (private.c:69-79) = `gxfp_check_mp_head`:
+     тип в старшем нибле ∈ {0xA,0xB,0xC}, `ck = b0+b1+b2`, `len<0x6C00`.
+  6. `SpiSendDataToDevice` (usbhal.c:0xd40+), конструирует кадр
+     `calloc(payload+8)`:
+     `[4B префикс (FUN_180015f44)] [flags = тип<<4 | ack<<1 (|1 если
+     без ожидания)] [len_lo][len_hi] [payload] [ck]`,
+     где `decl_len = payload+1`, ck при параметре-ack=1 считается
+     функцией с семенем **0xAA** (FUN_1800638a0), иначе константа
+     **0x88**. payload = Goodix-кадр `[cmd][data...]`.
+- Осталось добить (задания для GUI-сессии): FUN_180015f44 (магия 4B
+  префикса — вероятно sync-заголовок шины), FUN_1800638a0 (формула ck
+  — 0xAA−Σ по всему кадру?), FUN_1800119bc (открытие SPB: установка
+  частоты/режима), где применяется ChangeSpiSpeedSwitch (значения),
+  логика чтения ответа после EXECUTE_SEQUENCE (сколько байт читается
+  первым заходом), и главная загадка — мукс пинов CS/MOSI на Linux
+  (в Windows SPB-контроллер как-то их получает; искать _DSM у
+  контроллера SPI0 в DSDT или ресурсы "GPIO override").
